@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block contenido %}
+  <h1>Ingresar al panel</h1>
+  <form method="post">
+    <label for="password">Contraseña</label>
+    <input type="password" id="password" name="password" required autofocus>
+    <button type="submit">Ingresar</button>
+  </form>
+{% endblock %}
