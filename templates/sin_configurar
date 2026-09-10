@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Cartel en preparación</title>
+  <style>
+    body {
+      font-family: Arial, Helvetica, sans-serif;
+      display: flex; align-items: center; justify-content: center;
+      height: 100vh; margin: 0; text-align: center; color: #444;
+    }
+    div { max-width: 320px; padding: 20px; }
+  </style>
+</head>
+<body>
+  <div>
+    <p>Este cartel todavía no fue configurado.</p>
+    <p style="font-size: 0.8rem; color: #999;">Código: {{ codigo }}</p>
+  </div>
+</body>
+</html>
