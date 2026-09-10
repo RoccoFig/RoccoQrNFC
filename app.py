@@ -194,6 +194,31 @@ def generar():
     )
     return redirect(url_for("admin_panel"))
 
+
+@app.route("/admin/eliminar/<codigo>", methods=["POST"])
+@login_required
+def eliminar(codigo):
+    codigo = codigo.upper()
+    db = get_db()
+
+    fila = db.execute(
+        "SELECT * FROM codigos WHERE codigo = ?", (codigo,)
+    ).fetchone()
+
+    if fila is None:
+        abort(404)
+
+    db.execute("DELETE FROM codigos WHERE codigo = ?", (codigo,))
+    db.commit()
+
+    archivo_qr = os.path.join(QR_DIR, f"{codigo}.png")
+    if os.path.exists(archivo_qr):
+        os.remove(archivo_qr)
+
+    flash(f"Código {codigo} eliminado correctamente.")
+    return redirect(url_for("admin_panel"))
+
+
 if __name__ == "__main__":
     init_db()
     app.run(debug=True, port=5000)
