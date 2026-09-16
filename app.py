@@ -4,6 +4,29 @@ import secrets
 from datetime import datetime, timezone
 from functools import wraps
 from urllib.parse import urlparse
+def tipo_destino(destino):
+    try:
+        parsed = urlparse(destino)
+        host = (parsed.netloc or "").lower().split(":")[0]
+    except Exception:
+        return "otro"
+
+    if host == "instagram.com" or host.endswith(".instagram.com"):
+        return "instagram"
+
+    dominios_google = (
+        "google.com",
+        "google.com.ar",
+        "maps.google.com",
+        "maps.app.goo.gl",
+        "goo.gl",
+        "g.page"
+    )
+
+    if any(host == d or host.endswith("." + d) for d in dominios_google):
+        return "google"
+
+    return "otro"
 
 import qrcode
 from flask import (
