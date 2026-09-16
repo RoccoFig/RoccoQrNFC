@@ -37,25 +37,49 @@ from flask import (
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# Base incluida con el proyecto (sirve como respaldo/semilla inicial).
+# Base SQLite incluida en el proyecto.
 BUNDLED_DB_PATH = os.path.join(BASE_DIR, "carteles.db")
 
-# En Railway, configurar DB_PATH=/data/carteles.db y montar un Volume en /data.
-# En local, si DB_PATH no existe, sigue usando carteles.db junto a app.py.
-DB_PATH = os.environ.get("DB_PATH", BUNDLED_DB_PATH)
+# Orden de prioridad:
+# 1) DB_PATH configurado manualmente (recomendado: /data/carteles.db)
+# 2) Volume detectado automáticamente por Railway
+# 3) carteles.db local, para desarrollo o fallback
+EXPLICIT_DB_PATH = os.environ.get("DB_PATH", "").strip()
+RAILWAY_VOLUME_PATH = os.environ.get("RAILWAY_VOLUME_MOUNT_PATH", "").strip()
 
-# Asegura que exista la carpeta del archivo SQLite.
+if EXPLICIT_DB_PATH:
+    DB_PATH = EXPLICIT_DB_PATH
+elif RAILWAY_VOLUME_PATH:
+    DB_PATH = os.path.join(RAILWAY_VOLUME_PATH, "carteles.db")
+else:
+    DB_PATH = BUNDLED_DB_PATH
+
+# Aseguramos que exista la carpeta donde vivirá SQLite.
 db_dir = os.path.dirname(DB_PATH)
 if db_dir:
     os.makedirs(db_dir, exist_ok=True)
 
-# Si estamos usando un Volume nuevo y todavía no existe la DB persistente,
-# copiamos la base incluida con el proyecto para conservar los códigos existentes.
-if DB_PATH != BUNDLED_DB_PATH and not os.path.exists(DB_PATH) and os.path.exists(BUNDLED_DB_PATH):
+# Si el Volume está vacío en el primer arranque, copiamos la DB incluida
+# para conservar los códigos existentes. A partir de ahí se usa siempre
+# la copia persistente del Volume.
+if (
+    os.path.abspath(DB_PATH) != os.path.abspath(BUNDLED_DB_PATH)
+    and not os.path.exists(DB_PATH)
+    and os.path.exists(BUNDLED_DB_PATH)
+):
     shutil.copy2(BUNDLED_DB_PATH, DB_PATH)
 
+# Los QR pueden regenerarse, por eso no necesitan vivir en el Volume.
 QR_DIR = os.path.join(BASE_DIR, "qr_generados")
 os.makedirs(QR_DIR, exist_ok=True)
+
+# Diagnóstico visible en Deploy Logs. No expone contraseñas ni secretos.
+print(f"[RF NFC] SQLite DB: {DB_PATH}", flush=True)
+print(
+    f"[RF NFC] Volume Railway: {RAILWAY_VOLUME_PATH or 'no detectado'}",
+    flush=True
+)
+print(f"[RF NFC] DB existe: {os.path.exists(DB_PATH)}", flush=True)
 
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "cambiame123")
 SECRET_KEY = os.environ.get("SECRET_KEY", secrets.token_hex(32))
@@ -75,8 +99,11 @@ def now_iso():
 
 def get_db():
     if "db" not in g:
-        g.db = sqlite3.connect(DB_PATH, timeout=10)
+        g.db = sqlite3.connect(DB_PATH, timeout=15)
         g.db.row_factory = sqlite3.Row
+        # Mejora la convivencia entre lecturas/escrituras de SQLite.
+        g.db.execute("PRAGMA journal_mode=WAL")
+        g.db.execute("PRAGMA busy_timeout=15000")
     return g.db
 
 
@@ -249,6 +276,24 @@ def admin_login():
 def admin_logout():
     session.clear()
     return redirect(url_for("admin_login"))
+
+
+@app.route("/admin/diagnostico")
+@login_required
+def admin_diagnostico():
+    db = get_db()
+    try:
+        total = db.execute("SELECT COUNT(*) FROM codigos").fetchone()[0]
+    except Exception as exc:
+        total = f"ERROR: {type(exc).__name__}: {exc}"
+
+    return {
+        "db_path": DB_PATH,
+        "db_exists": os.path.exists(DB_PATH),
+        "volume_path": RAILWAY_VOLUME_PATH or None,
+        "explicit_db_path": EXPLICIT_DB_PATH or None,
+        "codigos": total,
+    }
 
 
 @app.route("/admin")
