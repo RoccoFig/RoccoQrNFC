@@ -188,12 +188,12 @@ def redirigir(codigo):
     db.commit()
     destino = fila["destino"]
 
-return render_template(
-    "redirigiendo.html",
-    destino=destino,
-    tipo=tipo_destino(destino),
-    codigo=codigo,
-)
+    return render_template(
+        "redirigiendo.html",
+        destino=destino,
+        tipo=tipo_destino(destino),
+        codigo=codigo,
+    )
 
 
 @app.route("/qr/<codigo>")
