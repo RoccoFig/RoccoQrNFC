@@ -186,7 +186,14 @@ def redirigir(codigo):
         (now_iso(), codigo),
     )
     db.commit()
-    return render_template("redirigiendo.html", destino=fila["destino"], codigo=codigo)
+    destino = fila["destino"]
+
+return render_template(
+    "redirigiendo.html",
+    destino=destino,
+    tipo=tipo_destino(destino),
+    codigo=codigo,
+)
 
 
 @app.route("/qr/<codigo>")
