@@ -1,6 +1,7 @@
 import os
 import sqlite3
 import secrets
+import shutil
 from datetime import datetime, timezone
 from functools import wraps
 from urllib.parse import urlparse
@@ -35,10 +36,24 @@ from flask import (
 )
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.environ.get(
-    "DB_PATH",
-    os.path.join(BASE_DIR, "carteles.db")
-)
+
+# Base incluida con el proyecto (sirve como respaldo/semilla inicial).
+BUNDLED_DB_PATH = os.path.join(BASE_DIR, "carteles.db")
+
+# En Railway, configurar DB_PATH=/data/carteles.db y montar un Volume en /data.
+# En local, si DB_PATH no existe, sigue usando carteles.db junto a app.py.
+DB_PATH = os.environ.get("DB_PATH", BUNDLED_DB_PATH)
+
+# Asegura que exista la carpeta del archivo SQLite.
+db_dir = os.path.dirname(DB_PATH)
+if db_dir:
+    os.makedirs(db_dir, exist_ok=True)
+
+# Si estamos usando un Volume nuevo y todavía no existe la DB persistente,
+# copiamos la base incluida con el proyecto para conservar los códigos existentes.
+if DB_PATH != BUNDLED_DB_PATH and not os.path.exists(DB_PATH) and os.path.exists(BUNDLED_DB_PATH):
+    shutil.copy2(BUNDLED_DB_PATH, DB_PATH)
+
 QR_DIR = os.path.join(BASE_DIR, "qr_generados")
 os.makedirs(QR_DIR, exist_ok=True)
 
