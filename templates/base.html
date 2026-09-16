@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#111827">
+  <title>{% block title %}RF Link · NFC + QR{% endblock %}</title>
+  <style>
+    :root{--bg:#f5f7fb;--card:#fff;--text:#101828;--muted:#667085;--line:#e4e7ec;--primary:#111827;--primary2:#344054;--blue:#175cd3;--bluebg:#eff8ff;--green:#067647;--greenbg:#ecfdf3;--red:#b42318;--redbg:#fef3f2;--amber:#b54708;--amberbg:#fffaeb;--radius:16px;--shadow:0 2px 10px rgba(16,24,40,.06)}
+    *{box-sizing:border-box} html{font-size:16px} body{margin:0;background:var(--bg);color:var(--text);font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.5;overflow-wrap:anywhere}
+    a{color:var(--blue);text-decoration:none} a:hover{text-decoration:underline}
+    .shell{width:min(1180px,calc(100% - 32px));margin:28px auto 48px}.nav{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-bottom:22px}.brand{display:flex;align-items:center;gap:11px;font-weight:800;color:var(--text);font-size:1.05rem}.brand:hover{text-decoration:none}.logo{display:grid;place-items:center;width:38px;height:38px;border-radius:12px;background:var(--primary);color:#fff;font-weight:900}.nav-actions{display:flex;align-items:center;gap:10px}
+    h1,h2,h3,p{margin-top:0} h1{font-size:clamp(1.55rem,3vw,2.2rem);line-height:1.15;margin-bottom:8px} h2{font-size:1.1rem} .muted{color:var(--muted)} .small{font-size:.86rem}
+    .card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:20px}.grid{display:grid;gap:16px}.stats{grid-template-columns:repeat(6,minmax(0,1fr));margin:18px 0}.stat{padding:17px}.stat .n{display:block;font-size:1.45rem;font-weight:800}.stat .l{font-size:.78rem;color:var(--muted)}
+    .btn,button{appearance:none;border:0;border-radius:10px;background:var(--primary);color:#fff;font:inherit;font-weight:650;padding:10px 14px;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;gap:7px;white-space:nowrap}.btn:hover,button:hover{background:var(--primary2);text-decoration:none}.btn-secondary{background:#fff;color:var(--text);border:1px solid var(--line)}.btn-secondary:hover{background:#f9fafb}.btn-danger{background:var(--red)}.btn-danger:hover{background:#912018}.btn-sm{padding:7px 10px;font-size:.84rem}.link-button{background:none;color:var(--blue);padding:0;font-weight:600}.link-button:hover{background:none;text-decoration:underline}
+    label{display:block;font-size:.88rem;font-weight:650;margin:0 0 6px} input,select{width:100%;min-width:0;border:1px solid #d0d5dd;border-radius:10px;padding:10px 12px;background:#fff;color:var(--text);font:inherit;outline:none} input:focus,select:focus{border-color:#84adff;box-shadow:0 0 0 3px rgba(23,92,211,.12)} .form-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}.field{min-width:0}.help{font-size:.78rem;color:var(--muted);margin-top:5px}.form-actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:18px}
+    .flash{padding:12px 14px;border-radius:11px;margin-bottom:14px;border:1px solid var(--line);background:var(--bluebg)}.flash.success{background:var(--greenbg);color:var(--green);border-color:#abefc6}.flash.error{background:var(--redbg);color:var(--red);border-color:#fecdca}
+    .toolbar{display:grid;grid-template-columns:minmax(200px,1fr) 170px auto;gap:10px;margin:18px 0}.table-wrap{width:100%;overflow-x:auto;border:1px solid var(--line);border-radius:14px;background:#fff}.table{width:100%;border-collapse:collapse;table-layout:fixed;min-width:960px}.table th,.table td{text-align:left;padding:13px 12px;border-bottom:1px solid var(--line);vertical-align:middle;font-size:.88rem}.table th{font-size:.76rem;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);background:#fcfcfd}.table tr:last-child td{border-bottom:0}.table .col-code{width:95px}.table .col-client{width:150px}.table .col-dest{width:270px}.table .col-num{width:75px;text-align:center}.table .col-actions{width:205px}.url-cell{display:block;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.badge{display:inline-flex;align-items:center;border-radius:999px;padding:4px 8px;font-size:.75rem;font-weight:700;background:var(--greenbg);color:var(--green)}.badge.pending{background:var(--amberbg);color:var(--amber)}.actions{display:flex;align-items:center;gap:7px;flex-wrap:wrap}.inline{display:inline}.code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:700;letter-spacing:.03em}
+    .url-box{display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;background:#f9fafb;border:1px solid var(--line);border-radius:11px;padding:10px}.url-text{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font: .86rem ui-monospace,SFMono-Regular,Menlo,monospace}.two-col{display:grid;grid-template-columns:1.2fr .8fr;gap:18px}.info-list{display:grid;gap:12px}.info-row{padding:12px 0;border-bottom:1px solid var(--line)}.info-row:last-child{border-bottom:0}.kpi-row{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.mini-kpi{background:#f9fafb;border:1px solid var(--line);border-radius:12px;padding:12px;text-align:center}.mini-kpi strong{display:block;font-size:1.2rem}.center-card{max-width:480px;margin:10vh auto}.empty{text-align:center;color:var(--muted);padding:34px 16px}
+    @media(max-width:900px){.stats{grid-template-columns:repeat(3,1fr)}.two-col{grid-template-columns:1fr}.toolbar{grid-template-columns:1fr 160px}.toolbar .create{grid-column:1/-1}.form-grid{grid-template-columns:1fr}}
+    @media(max-width:600px){.shell{width:min(100% - 20px,1180px);margin:14px auto 30px}.nav{align-items:flex-start}.brand span:last-child{display:none}.stats{grid-template-columns:repeat(2,1fr);gap:10px}.stat{padding:13px}.card{padding:15px;border-radius:13px}.toolbar{grid-template-columns:1fr}.toolbar .create{grid-column:auto}.nav-actions{gap:6px}.btn,button{min-height:42px}.mobile-stack{width:100%}.url-box{grid-template-columns:1fr}.url-box .btn{width:100%}.kpi-row{grid-template-columns:1fr 1fr 1fr}.center-card{margin:5vh auto}}
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <nav class="nav">
+      <a class="brand" href="{{ url_for('admin_panel') if session.get('logueado') else url_for('home') }}"><span class="logo">RF</span><span>RF Link · NFC + QR</span></a>
+      {% if session.get('logueado') %}
+      <div class="nav-actions"><form method="post" action="{{ url_for('admin_logout') }}"><button class="btn-secondary btn-sm" type="submit">Cerrar sesión</button></form></div>
+      {% endif %}
+    </nav>
+    {% with mensajes = get_flashed_messages(with_categories=true) %}{% for category,m in mensajes %}<div class="flash {{ category }}">{{ m }}</div>{% endfor %}{% endwith %}
+    {% block contenido %}{% endblock %}
+  </main>
+  <script>
+    async function copyText(text, button){
+      try{await navigator.clipboard.writeText(text);const old=button.textContent;button.textContent='Copiado ✓';setTimeout(()=>button.textContent=old,1400)}
+      catch(e){window.prompt('Copiá este enlace:',text)}
+    }
+  </script>
+</body>
+</html>
