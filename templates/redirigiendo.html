@@ -163,14 +163,38 @@
 </head>
 <body>
   <div class="card">
-    <div class="icon-wrap">
-      <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <line x1="5" y1="12" x2="19" y2="12"></line>
-        <polyline points="12 5 19 12 12 19"></polyline>
-      </svg>
-    </div>
-    <h1>¿Cómo la pasaste?</h1>
-    <p>Te estamos redirigiendo, un instante...</p>
+
+    {% if tipo == "google" %}
+      <div class="icon-wrap">
+        <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 2.75l2.86 5.8 6.4.93-4.63 4.51 1.09 6.37L12 17.35l-5.72 3.01 1.09-6.37-4.63-4.51 6.4-.93L12 2.75z"></path>
+        </svg>
+      </div>
+      <h1>¿Cómo la pasaste?</h1>
+      <p>Te estamos llevando a Google para que puedas dejarnos tu opinión.</p>
+
+    {% elif tipo == "instagram" %}
+      <div class="icon-wrap">
+        <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3.5" y="3.5" width="17" height="17" rx="5"></rect>
+          <circle cx="12" cy="12" r="4"></circle>
+          <circle cx="17.5" cy="6.5" r="0.8" fill="currentColor" stroke="none"></circle>
+        </svg>
+      </div>
+      <h1>¡Seguinos en Instagram!</h1>
+      <p>Te estamos llevando a nuestro perfil, un instante...</p>
+
+    {% else %}
+      <div class="icon-wrap">
+        <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="5" y1="12" x2="19" y2="12"></line>
+          <polyline points="12 5 19 12 12 19"></polyline>
+        </svg>
+      </div>
+      <h1>Un instante...</h1>
+      <p>Te estamos redirigiendo.</p>
+    {% endif %}
+
     <div class="progress-track">
       <div class="progress-fill"></div>
     </div>
