@@ -163,7 +163,7 @@ def redirigir(codigo):
         (now_iso(), codigo),
     )
     db.commit()
-    return redirect(fila["destino"], code=302)
+    return render_template("redirigiendo.html", destino=fila["destino"], codigo=codigo)
 
 
 @app.route("/qr/<codigo>")
