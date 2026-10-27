@@ -403,5 +403,5 @@ def admin_tags():
     return redirect(url_for("admin", m="Cartel registrado." if cur.rowcount else "Ese cartel ya estaba registrado."))
 
 init_db()
-if __name__ == "__main__":
+if __name__ == "__main__": 
     app.run(debug=True)
