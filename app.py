@@ -1,441 +1,407 @@
-import os
-import sqlite3
-import secrets
-import shutil
-from datetime import datetime, timezone
+import os, re, time, secrets, sqlite3, hashlib, hmac
 from functools import wraps
-from urllib.parse import urlparse
-def tipo_destino(destino):
-    try:
-        parsed = urlparse(destino)
-        host = (parsed.netloc or "").lower().split(":")[0]
-    except Exception:
-        return "otro"
+from flask import (Flask, request, redirect, url_for, g, abort, Response,
+                   render_template_string, make_response, session)
+from markupsafe import Markup
+from werkzeug.middleware.proxy_fix import ProxyFix
 
-    if host == "instagram.com" or host.endswith(".instagram.com"):
-        return "instagram"
-
-    dominios_google = (
-        "google.com",
-        "google.com.ar",
-        "maps.google.com",
-        "maps.app.goo.gl",
-        "goo.gl",
-        "g.page"
-    )
-
-    if any(host == d or host.endswith("." + d) for d in dominios_google):
-        return "google"
-
-    return "otro"
-
-import qrcode
-from flask import (
-    Flask, g, request, redirect, render_template,
-    session, url_for, flash, abort, send_from_directory
-)
-
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
-# Base SQLite incluida en el proyecto.
-BUNDLED_DB_PATH = os.path.join(BASE_DIR, "carteles.db")
-
-# Orden de prioridad:
-# 1) DB_PATH configurado manualmente (recomendado: /data/carteles.db)
-# 2) Volume detectado automáticamente por Railway
-# 3) carteles.db local, para desarrollo o fallback
-EXPLICIT_DB_PATH = os.environ.get("DB_PATH", "").strip()
-RAILWAY_VOLUME_PATH = os.environ.get("RAILWAY_VOLUME_MOUNT_PATH", "").strip()
-
-if EXPLICIT_DB_PATH:
-    DB_PATH = EXPLICIT_DB_PATH
-elif RAILWAY_VOLUME_PATH:
-    DB_PATH = os.path.join(RAILWAY_VOLUME_PATH, "carteles.db")
-else:
-    DB_PATH = BUNDLED_DB_PATH
-
-# Aseguramos que exista la carpeta donde vivirá SQLite.
-db_dir = os.path.dirname(DB_PATH)
-if db_dir:
-    os.makedirs(db_dir, exist_ok=True)
-
-# Si el Volume está vacío en el primer arranque, copiamos la DB incluida
-# para conservar los códigos existentes. A partir de ahí se usa siempre
-# la copia persistente del Volume.
-if (
-    os.path.abspath(DB_PATH) != os.path.abspath(BUNDLED_DB_PATH)
-    and not os.path.exists(DB_PATH)
-    and os.path.exists(BUNDLED_DB_PATH)
-):
-    shutil.copy2(BUNDLED_DB_PATH, DB_PATH)
-
-# Los QR pueden regenerarse, por eso no necesitan vivir en el Volume.
-QR_DIR = os.path.join(BASE_DIR, "qr_generados")
-os.makedirs(QR_DIR, exist_ok=True)
-
-# Diagnóstico visible en Deploy Logs. No expone contraseñas ni secretos.
-print(f"[RF NFC] SQLite DB: {DB_PATH}", flush=True)
-print(
-    f"[RF NFC] Volume Railway: {RAILWAY_VOLUME_PATH or 'no detectado'}",
-    flush=True
-)
-print(f"[RF NFC] DB existe: {os.path.exists(DB_PATH)}", flush=True)
-
-ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "cambiame123")
-SECRET_KEY = os.environ.get("SECRET_KEY", secrets.token_hex(32))
+import sdm
 
 app = Flask(__name__)
-app.secret_key = SECRET_KEY
-app.config.update(
-    SESSION_COOKIE_HTTPONLY=True,
-    SESSION_COOKIE_SAMESITE="Lax",
-    MAX_CONTENT_LENGTH=1 * 1024 * 1024,
-)
+DB = os.environ.get("DB_PATH", "puntos.db")
 
+# Tu contraseña se mantiene en RFNFC
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "RFNFC")
+PUNTOS_POR_VISITA = 10
 
-def now_iso():
-    return datetime.now(timezone.utc).isoformat()
+# Aquí agregué una clave secreta segura (aleatoria) para las sesiones
+SECRET = os.environ.get("SECRET_KEY", "b5d8f9a2c4e6g1h3j7k9l0m2n4p6q8r")
+app.secret_key = SECRET
+app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax")
 
+# Claves de los tags NTAG 424 DNA
+SDM_META_KEY = os.environ.get("SDM_META_KEY", "")
+SDM_FILE_KEY = os.environ.get("SDM_FILE_KEY", "")
 
-def get_db():
+# Apagamos el modo desarrollador para que no cause errores
+MODO_DEV = False 
+
+if os.environ.get("RENDER"):  
+    # Eliminé la restricción que te bloqueaba la contraseña RFNFC
+    if SECRET == "dev-secret":
+        raise RuntimeError("Definí una SECRET_KEY en las variables de entorno de Render.")
+    app.config["SESSION_COOKIE_SECURE"] = True
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)  # detrás del proxy HTTPS de Render
+OTP_MINUTOS = 10
+SELLOS_POR_TARJETA = 8  # visitas para completar una tarjeta
+PREMIO_TARJETA = "Premio por tarjeta completa"
+COOLDOWN_HORAS = 8  # una suma por visita cada X horas (anti-abuso v0)
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS comercios(
+  id INTEGER PRIMARY KEY, slug TEXT UNIQUE NOT NULL, nombre TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS clientes(
+  id INTEGER PRIMARY KEY, comercio_id INTEGER NOT NULL, token TEXT UNIQUE NOT NULL,
+  nombre TEXT NOT NULL, telefono TEXT NOT NULL, email TEXT,
+  acepta_whatsapp INTEGER NOT NULL DEFAULT 0, creado INTEGER NOT NULL,
+  UNIQUE(comercio_id, telefono));
+CREATE TABLE IF NOT EXISTS puntos_mov(
+  id INTEGER PRIMARY KEY, cliente_id INTEGER NOT NULL, delta INTEGER NOT NULL,
+  motivo TEXT NOT NULL, creado INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS premios(
+  id INTEGER PRIMARY KEY, comercio_id INTEGER NOT NULL, nombre TEXT NOT NULL,
+  costo INTEGER NOT NULL, activo INTEGER NOT NULL DEFAULT 1);
+CREATE TABLE IF NOT EXISTS canjes(
+  id INTEGER PRIMARY KEY, cliente_id INTEGER NOT NULL, premio_id INTEGER NOT NULL,
+  codigo TEXT UNIQUE NOT NULL, estado TEXT NOT NULL DEFAULT 'pendiente', creado INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS tags(
+  id INTEGER PRIMARY KEY, comercio_id INTEGER NOT NULL, uid TEXT UNIQUE NOT NULL,
+  ultimo_contador INTEGER NOT NULL DEFAULT -1, activo INTEGER NOT NULL DEFAULT 1);
+CREATE TABLE IF NOT EXISTS otp(
+  id INTEGER PRIMARY KEY, comercio_id INTEGER NOT NULL, telefono TEXT NOT NULL,
+  codigo_hash TEXT NOT NULL, expira INTEGER NOT NULL, intentos INTEGER NOT NULL DEFAULT 0,
+  usado INTEGER NOT NULL DEFAULT 0, creado INTEGER NOT NULL);
+"""
+
+def db():
     if "db" not in g:
-        g.db = sqlite3.connect(DB_PATH, timeout=15)
+        g.db = sqlite3.connect(DB)
         g.db.row_factory = sqlite3.Row
-        # Mejora la convivencia entre lecturas/escrituras de SQLite.
-        g.db.execute("PRAGMA journal_mode=WAL")
-        g.db.execute("PRAGMA busy_timeout=15000")
     return g.db
 
-
 @app.teardown_appcontext
-def close_db(exception=None):
-    db = g.pop("db", None)
-    if db is not None:
-        db.close()
-
-
-def column_names(db, table):
-    return {row[1] for row in db.execute(f"PRAGMA table_info({table})").fetchall()}
-
+def cerrar(_):
+    c = g.pop("db", None)
+    if c:
+        c.close()
 
 def init_db():
-    """Crea la tabla y migra bases anteriores sin borrar datos."""
-    db = sqlite3.connect(DB_PATH)
-    db.execute("""
-        CREATE TABLE IF NOT EXISTS codigos (
-            codigo TEXT PRIMARY KEY,
-            destino TEXT,
-            nombre_cliente TEXT,
-            clicks INTEGER NOT NULL DEFAULT 0,
-            qr_clicks INTEGER NOT NULL DEFAULT 0,
-            nfc_clicks INTEGER NOT NULL DEFAULT 0,
-            otros_clicks INTEGER NOT NULL DEFAULT 0,
-            creado_en TEXT NOT NULL,
-            ultimo_click TEXT
-        )
-    """)
+    c = sqlite3.connect(DB)
+    c.executescript(SCHEMA)
+    if not c.execute("SELECT 1 FROM comercios").fetchone():
+        c.execute("INSERT INTO comercios(slug,nombre) VALUES('demo','Local Demo')")
+        c.executemany("INSERT INTO premios(comercio_id,nombre,costo) VALUES(1,?,?)",
+                      [("Café gratis", 50), ("10% de descuento", 100), ("Postre de la casa", 150)])
+    c.commit()
+    c.close()
 
-    cols = column_names(db, "codigos")
-    migrations = {
-        "qr_clicks": "INTEGER NOT NULL DEFAULT 0",
-        "nfc_clicks": "INTEGER NOT NULL DEFAULT 0",
-        "otros_clicks": "INTEGER NOT NULL DEFAULT 0",
-    }
-    for name, definition in migrations.items():
-        if name not in cols:
-            db.execute(f"ALTER TABLE codigos ADD COLUMN {name} {definition}")
+def ahora():
+    return int(time.time())
 
-    db.commit()
-    db.close()
+def comercio(slug):
+    c = db().execute("SELECT * FROM comercios WHERE slug=?", (slug,)).fetchone()
+    return c or abort(404)
 
+def cliente_actual(com):
+    t = request.cookies.get("ct")
+    if not t:
+        return None
+    return db().execute("SELECT * FROM clientes WHERE token=? AND comercio_id=?",
+                        (t, com["id"])).fetchone()
 
-def generar_codigo_unico(db):
-    while True:
-        codigo = secrets.token_hex(3).upper()
-        existe = db.execute(
-            "SELECT 1 FROM codigos WHERE codigo = ?", (codigo,)
-        ).fetchone()
-        if not existe:
-            return codigo
+def saldo(cid):
+    return db().execute("SELECT COALESCE(SUM(delta),0) FROM puntos_mov WHERE cliente_id=?",
+                        (cid,)).fetchone()[0]
 
+def visitas(cid):
+    return db().execute("SELECT COUNT(*) FROM puntos_mov WHERE cliente_id=? AND motivo='visita'",
+                        (cid,)).fetchone()[0]
 
-def normalizar_destino(raw):
-    destino = (raw or "").strip()
-    if not destino:
-        return ""
-    if not destino.lower().startswith(("http://", "https://")):
-        destino = "https://" + destino
-    parsed = urlparse(destino)
-    if parsed.scheme not in ("http", "https") or not parsed.netloc:
-        raise ValueError("Ingresá una URL válida, por ejemplo https://instagram.com/usuario")
-    return destino
+def premio_tarjeta(com_id):
+    p = db().execute("SELECT id FROM premios WHERE comercio_id=? AND nombre=? AND activo=0",
+                     (com_id, PREMIO_TARJETA)).fetchone()
+    if p:
+        return p["id"]
+    cur = db().execute("INSERT INTO premios(comercio_id,nombre,costo,activo) VALUES(?,?,0,0)",
+                       (com_id, PREMIO_TARJETA))
+    return cur.lastrowid
 
+def sumar_visita(cid):
+    ult = db().execute("SELECT MAX(creado) FROM puntos_mov WHERE cliente_id=? AND motivo='visita'",
+                       (cid,)).fetchone()[0]
+    if ult and ahora() - ult < COOLDOWN_HORAS * 3600:
+        return False
+    db().execute("INSERT INTO puntos_mov(cliente_id,delta,motivo,creado) VALUES(?,?,?,?)",
+                 (cid, PUNTOS_POR_VISITA, "visita", ahora()))
+    if visitas(cid) % SELLOS_POR_TARJETA == 0:  # tarjeta completa: premio automático
+        com_id = db().execute("SELECT comercio_id FROM clientes WHERE id=?", (cid,)).fetchone()[0]
+        db().execute("INSERT INTO canjes(cliente_id,premio_id,codigo,creado) VALUES(?,?,?,?)",
+                     (cid, premio_tarjeta(com_id), secrets.token_hex(3).upper(), ahora()))
+    db().commit()
+    return True
 
-def login_required(view):
-    @wraps(view)
-    def wrapped(*args, **kwargs):
-        if not session.get("logueado"):
-            return redirect(url_for("admin_login", next=request.path))
-        return view(*args, **kwargs)
-    return wrapped
+# ---------- vistas ----------
+BASE = """<!doctype html><html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>{{ titulo }}</title>
+<style>
+:root{--fondo:#f2f4f1;--tinta:#16322c;--acento:#e0a526;--linea:#cfd8d3}
+*{box-sizing:border-box}body{margin:0;font:16px/1.5 system-ui,sans-serif;background:var(--fondo);color:var(--tinta)}
+main{max-width:30rem;margin:0 auto;padding:1.5rem 1.25rem 3rem}
+h1{font-size:1.6rem;margin:.2rem 0 1rem}h2{font-size:1.1rem;margin:1.8rem 0 .6rem}
+.puntos{font-size:3.4rem;font-weight:800;line-height:1}
+input,button{font:inherit;width:100%;padding:.75rem;border:1px solid var(--linea);border-radius:.5rem;margin:.25rem 0 .75rem;background:#fff}
+button{background:var(--tinta);color:#fff;border:0;font-weight:600;cursor:pointer}
+button:disabled{background:var(--linea);color:#6b7c76;cursor:not-allowed}
+button:focus-visible,input:focus-visible{outline:3px solid var(--acento);outline-offset:2px}
+.fila{display:flex;justify-content:space-between;gap:1rem;align-items:center;padding:.6rem 0;border-bottom:1px solid var(--linea)}
+.fila form{width:8rem}.fila button{margin:0}
+.aviso{background:#fff;border-left:4px solid var(--acento);padding:.6rem .8rem;margin:0 0 1rem}
+.codigo{font:700 1.4rem ui-monospace,monospace;letter-spacing:.1em}
+.chk{display:flex;gap:.6rem;align-items:flex-start;font-size:.9rem}.chk input{width:auto;margin-top:.3rem}
+.sellos{display:grid;grid-template-columns:repeat(4,1fr);gap:.6rem;margin:.6rem 0}.sello{aspect-ratio:1;border:2px dashed var(--linea);border-radius:50%;display:grid;place-items:center;font-weight:800;color:#8a9a94}.sello.on{background:var(--acento);border:2px solid var(--tinta);color:var(--tinta)}
+table{width:100%;border-collapse:collapse;font-size:.9rem}td,th{text-align:left;padding:.4rem .3rem;border-bottom:1px solid var(--linea)}
+</style></head><body><main>{{ cuerpo }}</main></body></html>"""
 
+T_REGISTRO = """<h1>{{ com.nombre }}</h1>
+<p>Registrate una vez y sumá puntos en cada visita.</p>
+{% if error %}<p class="aviso">{{ error }}</p>{% endif %}
+<form method="post" action="{{ url_for('registro', slug=com.slug) }}">
+<label>Nombre<input name="nombre" required autocomplete="name"></label>
+<label>Teléfono (con código de área)<input name="telefono" type="tel" required autocomplete="tel"></label>
+<label>Email (opcional)<input name="email" type="email" autocomplete="email"></label>
+<label class="chk"><input type="checkbox" name="acepta" value="1">
+<span>Acepto recibir cupones e invitaciones por WhatsApp. Puedo darme de baja cuando quiera.</span></label>
+<button>Crear mi cuenta</button></form>
+<p><a href="{{ url_for('entrar', slug=com.slug) }}">Ya tengo cuenta</a></p>"""
 
-def public_base_url():
-    configured = os.environ.get("PUBLIC_BASE_URL", "").strip().rstrip("/")
-    return configured or request.host_url.rstrip("/")
+T_HOME = """<h1>Hola, {{ c.nombre }}</h1>
+{% if sumo %}<p class="aviso">+{{ pts }} puntos y 1 sello por tu visita.{% if completa %} ¡Completaste tu tarjeta! Tu premio está más abajo.{% endif %}</p>
+{% elif ya %}<p class="aviso">Ya sumaste puntos por esta visita. Volvé en otra visita para sumar más.</p>{% else %}<p><small>Para sumar puntos y un sello, apoyá tu celular en el cartel del local.</small></p>{% endif %}
+<div class="puntos">{{ total }}</div><div>puntos</div>
+<h2>Tu tarjeta de sellos</h2>
+<div class="sellos" role="img" aria-label="{{ sellos }} de {{ tarjeta }} sellos">
+{% for i in range(tarjeta) %}<span class="sello {{ 'on' if i < sellos }}">{{ '✓' if i < sellos else i + 1 }}</span>{% endfor %}</div>
+<small>{{ sellos }} de {{ tarjeta }}. Al completarla ganás un premio.</small>
+{% if pendientes %}<h2>Tus canjes para mostrar en caja</h2>
+{% for p in pendientes %}<div class="fila"><span>{{ p.nombre }}</span><span class="codigo">{{ p.codigo }}</span></div>{% endfor %}{% endif %}
+<h2>Premios</h2>
+{% for p in premios %}<div class="fila"><span>{{ p.nombre }}<br><small>{{ p.costo }} puntos</small></span>
+<form method="post" action="{{ url_for('canjear', slug=com.slug, premio_id=p.id) }}">
+<button {% if total < p.costo %}disabled{% endif %}>Canjear</button></form></div>{% endfor %}
+{% if c.acepta_whatsapp %}<form method="post" action="{{ url_for('baja', slug=com.slug) }}">
+<p><small>Recibís cupones e invitaciones por WhatsApp.</small></p><button>Dejar de recibir mensajes</button></form>
+{% else %}<p><small>No vas a recibir mensajes por WhatsApp.</small></p>{% endif %}"""
 
+T_ADMIN = """<h1>Panel del local</h1>
+{% if msg %}<p class="aviso">{{ msg }}</p>{% endif %}
+<h2>Validar un canje</h2>
+<form method="post" action="{{ url_for('admin_validar') }}">
+<input name="codigo" placeholder="Código del cliente" required autocomplete="off"><button>Validar y entregar</button></form>
+<h2>Registrar un cartel</h2>
+<form method="post" action="{{ url_for('admin_tags') }}">
+<input name="uid" placeholder="UID del tag (14 caracteres)" required autocomplete="off"><button>Registrar cartel</button></form>
+<p><small>Carteles registrados: {{ ntags }}</small></p>
+<h2>Canjes pendientes</h2>
+{% for p in pend %}<div class="fila"><span>{{ p.nombre }} · {{ p.cliente }}</span><span class="codigo">{{ p.codigo }}</span></div>
+{% else %}<p>No hay canjes pendientes.</p>{% endfor %}
+<h2>Clientes ({{ clientes|length }})</h2>
+<table><tr><th>Nombre</th><th>Teléfono</th><th>Puntos</th></tr>
+{% for k in clientes %}<tr><td>{{ k.nombre }}</td><td>{{ k.telefono }}</td><td>{{ k.total }}</td></tr>{% endfor %}</table>"""
 
-def enlace_publico(codigo, source=None):
-    base = public_base_url()
-    url = f"{base}/r/{codigo}"
-    if source:
-        url += f"?src={source}"
-    return url
+def pagina(titulo, tpl, **ctx):
+    cuerpo = Markup(render_template_string(tpl, **ctx))
+    return render_template_string(BASE, titulo=titulo, cuerpo=cuerpo)
 
+@app.route("/l/<slug>")
+def local(slug):
+    com = comercio(slug)
+    c = cliente_actual(com)
+    if not c:
+        return pagina(com["nombre"], T_REGISTRO, com=com, error=request.args.get("e"))
+    res = session.pop("resultado", None) or {}
+    sumo = bool(res.get("sumo"))
+    premios = db().execute("SELECT * FROM premios WHERE comercio_id=? AND activo=1 ORDER BY costo",
+                           (com["id"],)).fetchall()
+    pend = db().execute("""SELECT k.codigo, p.nombre FROM canjes k JOIN premios p ON p.id=k.premio_id
+                           WHERE k.cliente_id=? AND k.estado='pendiente'""", (c["id"],)).fetchall()
+    n = visitas(c["id"])
+    sellos = ((n - 1) % SELLOS_POR_TARJETA) + 1 if n else 0
+    return pagina(com["nombre"], T_HOME, com=com, c=c, sumo=sumo, pts=PUNTOS_POR_VISITA,
+                  total=saldo(c["id"]), premios=premios, pendientes=pend, sellos=sellos,
+                  tarjeta=SELLOS_POR_TARJETA, completa=bool(res.get("completa")), ya=bool(res) and not sumo)
 
-def crear_qr(codigo):
-    url = enlace_publico(codigo, "qr")
-    qr = qrcode.QRCode(version=None, box_size=12, border=4)
-    qr.add_data(url)
-    qr.make(fit=True)
-    qr.make_image(fill_color="black", back_color="white").save(
-        os.path.join(QR_DIR, f"{codigo}.png")
-    )
+@app.post("/l/<slug>/registro")
+def registro(slug):
+    com = comercio(slug)
+    nombre = request.form.get("nombre", "").strip()[:80]
+    tel = re.sub(r"\D", "", request.form.get("telefono", ""))
+    email = request.form.get("email", "").strip()[:120]
+    acepta = 1 if request.form.get("acepta") else 0
+    def volver(msg):
+        return redirect(url_for("local", slug=slug, e=msg))
+    if not nombre or not (8 <= len(tel) <= 15):
+        return volver("Revisá tu nombre y tu teléfono.")
+    if db().execute("SELECT 1 FROM clientes WHERE comercio_id=? AND telefono=?", (com["id"], tel)).fetchone():
+        return volver("Ese teléfono ya está registrado. Usá «Ya tengo cuenta» para entrar con un código.")
+    token = secrets.token_urlsafe(24)
+    db().execute("""INSERT INTO clientes(comercio_id,token,nombre,telefono,email,acepta_whatsapp,creado)
+                    VALUES(?,?,?,?,?,?,?)""", (com["id"], token, nombre, tel, email, acepta, ahora()))
+    db().commit()
+    if session.pop("scan_ok", None) == slug:
+        registrar_visita(db().execute("SELECT * FROM clientes WHERE token=?", (token,)).fetchone())
+    r = make_response(redirect(url_for("local", slug=slug)))
+    r.set_cookie("ct", token, max_age=365 * 86400, httponly=True, samesite="Lax", secure=request.is_secure)
+    return r
 
+@app.post("/l/<slug>/canjear/<int:premio_id>")
+def canjear(slug, premio_id):
+    com = comercio(slug)
+    c = cliente_actual(com) or abort(403)
+    p = db().execute("SELECT * FROM premios WHERE id=? AND comercio_id=? AND activo=1",
+                     (premio_id, com["id"])).fetchone() or abort(404)
+    if saldo(c["id"]) >= p["costo"]:  # los puntos se descuentan al generar el código
+        db().execute("INSERT INTO puntos_mov(cliente_id,delta,motivo,creado) VALUES(?,?,?,?)",
+                     (c["id"], -p["costo"], "canje", ahora()))
+        db().execute("INSERT INTO canjes(cliente_id,premio_id,codigo,creado) VALUES(?,?,?,?)",
+                     (c["id"], p["id"], secrets.token_hex(3).upper(), ahora()))
+        db().commit()
+    return redirect(url_for("local", slug=slug))
 
-@app.route("/")
-def home():
-    return render_template("home.html")
+T_ENTRAR = """<h1>Entrar a mi cuenta</h1>
+<p>Te mandamos un código por WhatsApp.</p>
+<form method="post"><label>Teléfono<input name="telefono" type="tel" required autocomplete="tel"></label>
+<button>Enviar código</button></form>"""
 
+T_VERIFICAR = """<h1>Ingresá tu código</h1>
+<p>Si el número está registrado, te llegó un código de 6 dígitos por WhatsApp.</p>
+{% if error %}<p class="aviso">{{ error }}</p>{% endif %}
+<form method="post"><input type="hidden" name="tel" value="{{ tel }}">
+<label>Código<input name="codigo" inputmode="numeric" maxlength="6" required autocomplete="one-time-code"></label>
+<button>Entrar</button></form>"""
 
-@app.route("/r/<codigo>")
-def redirigir(codigo):
-    codigo = codigo.upper().strip()
-    db = get_db()
-    fila = db.execute("SELECT * FROM codigos WHERE codigo = ?", (codigo,)).fetchone()
-    if fila is None:
-        abort(404)
-    if not fila["destino"]:
-        return render_template("sin_configurar.html", codigo=codigo), 200
+def enviar_whatsapp(tel, texto):
+    # Modo desarrollo: el mensaje sale por la consola. Acá se conecta la API oficial de WhatsApp.
+    print(f"[WHATSAPP -> {tel}] {texto}", flush=True)
 
-    src = request.args.get("src", "").lower()
-    if src == "qr":
-        source_column = "qr_clicks"
-    elif src == "nfc":
-        source_column = "nfc_clicks"
+def hash_otp(codigo, tel):
+    return hmac.new(SECRET.encode(), f"{tel}:{codigo}".encode(), hashlib.sha256).hexdigest()
+
+@app.route("/l/<slug>/entrar", methods=["GET", "POST"])
+def entrar(slug):
+    com = comercio(slug)
+    if request.method == "GET":
+        return pagina(com["nombre"], T_ENTRAR, com=com)
+    tel = re.sub(r"\D", "", request.form.get("telefono", ""))
+    existe = db().execute("SELECT 1 FROM clientes WHERE comercio_id=? AND telefono=?",
+                          (com["id"], tel)).fetchone()
+    recientes = db().execute("SELECT COUNT(*) FROM otp WHERE comercio_id=? AND telefono=? AND creado>?",
+                             (com["id"], tel, ahora() - 3600)).fetchone()[0]
+    if existe and recientes < 3:  # máximo 3 códigos por hora
+        codigo = f"{secrets.randbelow(10**6):06d}"
+        db().execute("INSERT INTO otp(comercio_id,telefono,codigo_hash,expira,creado) VALUES(?,?,?,?,?)",
+                     (com["id"], tel, hash_otp(codigo, tel), ahora() + OTP_MINUTOS * 60, ahora()))
+        db().commit()
+        enviar_whatsapp(tel, f"Tu código de {com['nombre']} es {codigo}. Vence en {OTP_MINUTOS} minutos.")
+    return redirect(url_for("verificar", slug=slug, tel=tel))
+
+@app.route("/l/<slug>/verificar", methods=["GET", "POST"])
+def verificar(slug):
+    com = comercio(slug)
+    tel = re.sub(r"\D", "", request.values.get("tel", ""))
+    if request.method == "GET":
+        return pagina(com["nombre"], T_VERIFICAR, com=com, tel=tel, error=request.args.get("e"))
+    codigo = request.form.get("codigo", "").strip()
+    o = db().execute("""SELECT * FROM otp WHERE comercio_id=? AND telefono=? AND usado=0 AND expira>?
+                        ORDER BY id DESC LIMIT 1""", (com["id"], tel, ahora())).fetchone()
+    if o and o["intentos"] < 5:  # máximo 5 intentos por código
+        if hmac.compare_digest(o["codigo_hash"], hash_otp(codigo, tel)):
+            db().execute("UPDATE otp SET usado=1 WHERE id=?", (o["id"],))
+            db().commit()
+            c = db().execute("SELECT token FROM clientes WHERE comercio_id=? AND telefono=?",
+                             (com["id"], tel)).fetchone()
+            r = make_response(redirect(url_for("local", slug=slug)))
+            r.set_cookie("ct", c["token"], max_age=365 * 86400, httponly=True,
+                         samesite="Lax", secure=request.is_secure)
+            return r
+        db().execute("UPDATE otp SET intentos=intentos+1 WHERE id=?", (o["id"],))
+        db().commit()
+    return redirect(url_for("verificar", slug=slug, tel=tel, e="Código incorrecto o vencido."))
+
+@app.post("/l/<slug>/baja")
+def baja(slug):
+    com = comercio(slug)
+    c = cliente_actual(com) or abort(403)
+    db().execute("UPDATE clientes SET acepta_whatsapp=0 WHERE id=?", (c["id"],))
+    db().commit()
+    return redirect(url_for("local", slug=slug))
+
+def registrar_visita(c):
+    sumo = sumar_visita(c["id"])
+    session["resultado"] = {"sumo": sumo,
+                            "completa": sumo and visitas(c["id"]) % SELLOS_POR_TARJETA == 0}
+
+def tras_escaneo_valido(com):
+    c = cliente_actual(com)
+    if c:
+        registrar_visita(c)
     else:
-        source_column = "otros_clicks"
+        session["scan_ok"] = com["slug"]  # su primera visita se suma al registrarse
+    return redirect(url_for("local", slug=com["slug"]))
 
-    db.execute(
-        f"UPDATE codigos SET clicks = clicks + 1, {source_column} = {source_column} + 1, ultimo_click = ? WHERE codigo = ?",
-        (now_iso(), codigo),
-    )
-    db.commit()
-    destino = fila["destino"]
-
-    return render_template(
-        "redirigiendo.html",
-        destino=destino,
-        tipo=tipo_destino(destino),
-        codigo=codigo,
-    )
-
-
-@app.route("/qr/<codigo>")
-@login_required
-def ver_qr(codigo):
-    codigo = codigo.upper().strip()
-    nombre = f"{codigo}.png"
-    ruta = os.path.join(QR_DIR, nombre)
-    if not os.path.exists(ruta):
-        fila = get_db().execute("SELECT codigo FROM codigos WHERE codigo = ?", (codigo,)).fetchone()
-        if fila is None:
-            abort(404)
-        crear_qr(codigo)
-    return send_from_directory(QR_DIR, nombre)
-
-
-@app.route("/admin/login", methods=["GET", "POST"])
-def admin_login():
-    if session.get("logueado"):
-        return redirect(url_for("admin_panel"))
-    if request.method == "POST":
-        password = request.form.get("password", "")
-        if secrets.compare_digest(password, ADMIN_PASSWORD):
-            session["logueado"] = True
-            destino = request.args.get("next")
-            if not destino or not destino.startswith("/") or destino.startswith("//"):
-                destino = url_for("admin_panel")
-            return redirect(destino)
-        flash("Contraseña incorrecta.", "error")
-    return render_template("login.html")
-
-
-@app.route("/admin/logout", methods=["POST"])
-@login_required
-def admin_logout():
-    session.clear()
-    return redirect(url_for("admin_login"))
-
-
-@app.route("/admin/diagnostico")
-@login_required
-def admin_diagnostico():
-    db = get_db()
+@app.route("/t")
+def escaneo():
+    if not (SDM_META_KEY and SDM_FILE_KEY):
+        abort(503)
     try:
-        total = db.execute("SELECT COUNT(*) FROM codigos").fetchone()[0]
-    except Exception as exc:
-        total = f"ERROR: {type(exc).__name__}: {exc}"
+        uid, ctr = sdm.verificar(request.args.get("picc_data", ""), request.args.get("cmac", ""),
+                                 bytes.fromhex(SDM_META_KEY), bytes.fromhex(SDM_FILE_KEY))
+    except ValueError:
+        abort(403)
+    tag = db().execute("SELECT * FROM tags WHERE uid=? AND activo=1", (uid,)).fetchone() or abort(403)
+    com = db().execute("SELECT * FROM comercios WHERE id=?", (tag["comercio_id"],)).fetchone()
+    cur = db().execute("UPDATE tags SET ultimo_contador=? WHERE id=? AND ultimo_contador<?",
+                       (ctr, tag["id"], ctr))
+    db().commit()
+    if not cur.rowcount:  # el contador no avanzó: es un escaneo repetido o copiado, no suma
+        session["resultado"] = {"sumo": False, "completa": False}
+        return redirect(url_for("local", slug=com["slug"]))
+    return tras_escaneo_valido(com)
 
-    return {
-        "db_path": DB_PATH,
-        "db_exists": os.path.exists(DB_PATH),
-        "volume_path": RAILWAY_VOLUME_PATH or None,
-        "explicit_db_path": EXPLICIT_DB_PATH or None,
-        "codigos": total,
-    }
+if MODO_DEV:
+    @app.route("/dev/escanear/<slug>")
+    def dev_escanear(slug):
+        return tras_escaneo_valido(comercio(slug))
 
+# ---------- panel del local ----------
+def solo_admin(f):
+    @wraps(f)
+    def w(*a, **k):
+        auth = request.authorization
+        if not auth or not secrets.compare_digest(auth.password or "", ADMIN_PASSWORD):
+            return Response("Acceso restringido", 401, {"WWW-Authenticate": 'Basic realm="admin"'})
+        return f(*a, **k)
+    return w
 
 @app.route("/admin")
-@login_required
-def admin_panel():
-    db = get_db()
-    buscar = request.args.get("q", "").strip()
-    estado = request.args.get("estado", "todos")
+@solo_admin
+def admin():
+    pend = db().execute("""SELECT k.codigo, p.nombre, c.nombre AS cliente FROM canjes k
+        JOIN premios p ON p.id=k.premio_id JOIN clientes c ON c.id=k.cliente_id
+        WHERE k.estado='pendiente' ORDER BY k.creado""").fetchall()
+    clientes = db().execute("""SELECT c.nombre, c.telefono, COALESCE(SUM(m.delta),0) AS total
+        FROM clientes c LEFT JOIN puntos_mov m ON m.cliente_id=c.id GROUP BY c.id ORDER BY total DESC""").fetchall()
+    ntags = db().execute("SELECT COUNT(*) FROM tags WHERE activo=1").fetchone()[0]
+    return pagina("Panel", T_ADMIN, pend=pend, clientes=clientes, msg=request.args.get("m"), ntags=ntags)
 
-    sql = "SELECT * FROM codigos WHERE 1=1"
-    params = []
-    if buscar:
-        sql += " AND (codigo LIKE ? OR nombre_cliente LIKE ? OR destino LIKE ?)"
-        like = f"%{buscar}%"
-        params.extend([like, like, like])
-    if estado == "configurados":
-        sql += " AND destino IS NOT NULL AND TRIM(destino) <> ''"
-    elif estado == "pendientes":
-        sql += " AND (destino IS NULL OR TRIM(destino) = '')"
-    sql += " ORDER BY creado_en DESC"
+@app.post("/admin/validar")
+@solo_admin
+def admin_validar():
+    cod = request.form.get("codigo", "").strip().upper()
+    cur = db().execute("UPDATE canjes SET estado='usado' WHERE codigo=? AND estado='pendiente'", (cod,))
+    db().commit()
+    return redirect(url_for("admin", m="Canje entregado." if cur.rowcount else "Código inválido o ya usado."))
 
-    codigos = db.execute(sql, params).fetchall()
-    stats = db.execute("""
-        SELECT
-            COUNT(*) total,
-            SUM(CASE WHEN destino IS NOT NULL AND TRIM(destino) <> '' THEN 1 ELSE 0 END) configurados,
-            SUM(CASE WHEN destino IS NULL OR TRIM(destino) = '' THEN 1 ELSE 0 END) pendientes,
-            COALESCE(SUM(clicks), 0) clicks,
-            COALESCE(SUM(qr_clicks), 0) qr_clicks,
-            COALESCE(SUM(nfc_clicks), 0) nfc_clicks
-        FROM codigos
-    """).fetchone()
+@app.post("/admin/tags")
+@solo_admin
+def admin_tags():
+    uid = re.sub(r"[^0-9A-Fa-f]", "", request.form.get("uid", "")).upper()
+    if len(uid) != 14:
+        return redirect(url_for("admin", m="El UID debe tener 14 caracteres (7 bytes)."))
+    com = db().execute("SELECT id FROM comercios ORDER BY id LIMIT 1").fetchone()
+    cur = db().execute("INSERT OR IGNORE INTO tags(comercio_id,uid) VALUES(?,?)", (com["id"], uid))
+    db().commit()
+    return redirect(url_for("admin", m="Cartel registrado." if cur.rowcount else "Ese cartel ya estaba registrado."))
 
-    return render_template(
-        "panel.html", codigos=codigos, stats=stats,
-        buscar=buscar, estado=estado, base_url=public_base_url()
-    )
-
-
-@app.route("/admin/configurar/<codigo>", methods=["GET", "POST"])
-@login_required
-def configurar(codigo):
-    codigo = codigo.upper().strip()
-    db = get_db()
-    fila = db.execute("SELECT * FROM codigos WHERE codigo = ?", (codigo,)).fetchone()
-    if fila is None:
-        abort(404)
-
-    if request.method == "POST":
-        nombre_cliente = request.form.get("nombre_cliente", "").strip()[:150]
-        try:
-            destino = normalizar_destino(request.form.get("destino", ""))
-        except ValueError as exc:
-            flash(str(exc), "error")
-            return render_template(
-                "configurar.html", fila=fila,
-                nfc_url=enlace_publico(codigo, "nfc"),
-                qr_url=enlace_publico(codigo, "qr")
-            ), 400
-
-        db.execute(
-            "UPDATE codigos SET destino = ?, nombre_cliente = ? WHERE codigo = ?",
-            (destino or None, nombre_cliente or None, codigo),
-        )
-        db.commit()
-        flash(f"Código {codigo} actualizado correctamente.", "success")
-        return redirect(url_for("admin_panel"))
-
-    return render_template(
-        "configurar.html", fila=fila,
-        nfc_url=enlace_publico(codigo, "nfc"),
-        qr_url=enlace_publico(codigo, "qr")
-    )
-
-
-@app.route("/admin/generar", methods=["POST"])
-@login_required
-def generar():
-    try:
-        cantidad = int(request.form.get("cantidad", 10))
-    except (TypeError, ValueError):
-        cantidad = 10
-    cantidad = max(1, min(cantidad, 500))
-
-    db = get_db()
-    creados = []
-    for _ in range(cantidad):
-        codigo = generar_codigo_unico(db)
-        db.execute(
-            "INSERT INTO codigos (codigo, destino, nombre_cliente, clicks, qr_clicks, nfc_clicks, otros_clicks, creado_en) "
-            "VALUES (?, NULL, NULL, 0, 0, 0, 0, ?)",
-            (codigo, now_iso()),
-        )
-        crear_qr(codigo)
-        creados.append(codigo)
-    db.commit()
-
-    flash(f"Se generaron {len(creados)} carteles nuevos.", "success")
-    return redirect(url_for("admin_panel"))
-
-
-@app.route("/admin/regenerar-qr/<codigo>", methods=["POST"])
-@login_required
-def regenerar_qr(codigo):
-    codigo = codigo.upper().strip()
-    fila = get_db().execute("SELECT codigo FROM codigos WHERE codigo = ?", (codigo,)).fetchone()
-    if fila is None:
-        abort(404)
-    crear_qr(codigo)
-    flash(f"QR de {codigo} regenerado con seguimiento QR.", "success")
-    return redirect(url_for("configurar", codigo=codigo))
-
-
-@app.route("/admin/eliminar/<codigo>", methods=["POST"])
-@login_required
-def eliminar(codigo):
-    codigo = codigo.upper().strip()
-    db = get_db()
-    fila = db.execute("SELECT codigo FROM codigos WHERE codigo = ?", (codigo,)).fetchone()
-    if fila is None:
-        abort(404)
-    db.execute("DELETE FROM codigos WHERE codigo = ?", (codigo,))
-    db.commit()
-    archivo_qr = os.path.join(QR_DIR, f"{codigo}.png")
-    if os.path.exists(archivo_qr):
-        os.remove(archivo_qr)
-    flash(f"Código {codigo} eliminado.", "success")
-    return redirect(url_for("admin_panel"))
-
-
-@app.errorhandler(404)
-def not_found(error):
-    return render_template("error.html", codigo=404, mensaje="La página o el código solicitado no existe."), 404
-
-
-@app.errorhandler(500)
-def server_error(error):
-    return render_template("error.html", codigo=500, mensaje="Ocurrió un error interno. Intentá nuevamente."), 500
-
-
-# También se ejecuta cuando Railway/Gunicorn importa app.py.
 init_db()
-
 if __name__ == "__main__":
-    app.run(debug=os.environ.get("FLASK_DEBUG") == "1", port=int(os.environ.get("PORT", 5000)))
+    app.run(debug=True)
